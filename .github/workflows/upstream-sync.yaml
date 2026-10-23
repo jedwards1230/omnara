@@ -1,0 +1,433 @@
+# Upstream sync: rebase the fork's single patch commit onto the newest upstream
+# cluster-vX.Y.Z release, gate it with `make verify`, push the git tag
+# homelab-vX.Y.Z-rN, then build and publish the five multi-arch images
+# ghcr.io/<owner>/omnara-{web,api,worker,maintenance,migrations}:vX.Y.Z-rN and
+# verify that they pull anonymously. Re-runs are idempotent: an unchanged patch
+# is a no-op, a half-published revision is resumed, a changed patch mints rN+1.
+# Nothing is published unless the rebase is clean and the gate is green.
+# See README.md on the homelab branch.
+name: Upstream sync
+
+run-name: >-
+  ${{ github.event_name == 'schedule' && 'Upstream sync (daily)' ||
+  format('Upstream sync: {0} onto {1}{2}',
+  inputs.patch_ref || 'feat/outbound-allowed-cidrs',
+  inputs.upstream_tag || 'latest cluster tag',
+  inputs.dry_run && ' (dry run)' || '') }}
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Upstream cluster-vX.Y.Z tag to build (empty = highest upstream release tag)
+        required: false
+        default: ''
+        type: string
+      patch_ref:
+        description: Fork branch or tag whose tip is the single patch commit
+        required: false
+        default: feat/outbound-allowed-cidrs
+        type: string
+      dry_run:
+        description: Rehearse everything, including the image builds, but push nothing
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+# One publishing sync at a time and never cancel one midway. Dry runs push
+# nothing, so each gets its own group and never queues behind (or displaces)
+# a publishing run.
+concurrency:
+  group: upstream-sync-${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && format('dry-run-{0}', github.run_id) || 'publish' }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: omnara-ai/omnara
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/omnara
+
+jobs:
+  # Scheduled workflows in public repositories are disabled after 60 days
+  # without repository activity. Re-enabling the (still enabled) workflow
+  # through the API resets that timer, so a daily run keeps itself alive.
+  keepalive:
+    name: Keep the schedule enabled
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/upstream-sync.yaml/enable"
+          echo "Re-enabled \`upstream-sync.yaml\` (resets the 60-day inactivity timer)." >> "$GITHUB_STEP_SUMMARY"
+
+  prepare:
+    name: Rebase patch and plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+      need_build: ${{ steps.plan.outputs.need_build }}
+      push_tag: ${{ steps.plan.outputs.push_tag }}
+      upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
+      upstream_commit: ${{ steps.plan.outputs.upstream_commit }}
+      version: ${{ steps.plan.outputs.version }}
+      revision: ${{ steps.plan.outputs.revision }}
+      git_tag: ${{ steps.plan.outputs.git_tag }}
+      image_tag: ${{ steps.plan.outputs.image_tag }}
+      commit: ${{ steps.plan.outputs.commit }}
+      tree: ${{ steps.plan.outputs.tree }}
+      patch_ref: ${{ steps.plan.outputs.patch_ref }}
+      patch_commit: ${{ steps.plan.outputs.patch_commit }}
+      rebase: ${{ steps.plan.outputs.rebase }}
+    steps:
+      - name: Refuse to run from a non-default branch
+        if: github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          echo "::error::Run this workflow from the default branch, not ${GITHUB_REF}."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ci
+          persist-credentials: false
+
+      - name: Rebase and plan
+        id: plan
+        env:
+          FORK_REPO: ${{ github.repository }}
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          INPUT_PATCH_REF: ${{ inputs.patch_ref }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run || false }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUNDLE: ${{ runner.temp }}/sync.bundle
+        run: ci/.github/scripts/prepare.sh
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sync-bundle
+          path: ${{ runner.temp }}/sync.bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  gate:
+    name: Gate (make verify)
+    needs: prepare
+    if: needs.prepare.outputs.need_build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      UPSTREAM_COMMIT: ${{ needs.prepare.outputs.upstream_commit }}
+      COMMIT: ${{ needs.prepare.outputs.commit }}
+      TREE: ${{ needs.prepare.outputs.tree }}
+      BUNDLE: ${{ github.workspace }}/bundle/sync.bundle
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ci
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sync-bundle
+          path: bundle
+
+      - name: Materialize the planned commit
+        run: ci/.github/scripts/materialize.sh src
+
+      # Same toolchain setup as upstream's .github/workflows/ci.yaml.
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src/go.mod
+          cache: false
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.cache/golangci-lint
+          key: go-${{ runner.os }}-${{ runner.arch }}-gate-${{ hashFiles('src/**/go.mod', 'src/**/go.sum') }}
+          restore-keys: go-${{ runner.os }}-${{ runner.arch }}-gate-
+
+      - id: golangci-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: src/.tools/custom-golangci-lint
+          key: custom-golangci-lint-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('src/.custom-gcl.yml', 'src/tools/ci/go.mod', 'src/tools/ci/go.sum', 'src/tools/omnaralint/go.mod', 'src/tools/omnaralint/go.sum', 'src/tools/omnaralint/**/*.go') }}
+
+      - if: steps.golangci-cache.outputs.cache-hit == 'true'
+        run: touch src/.tools/custom-golangci-lint
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: src/.node-version
+
+      - run: corepack enable
+
+      - name: Install test tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep gcc libc6-dev
+
+      - name: make verify
+        working-directory: src
+        run: make verify
+
+      - name: Report gate result
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+          PATCH_REF: ${{ needs.prepare.outputs.patch_ref }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+        run: |
+          if [ "$RESULT" = success ]; then
+            echo "## :white_check_mark: \`make verify\` passed on \`${COMMIT}\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::error title=Gate failed::make verify failed on ${COMMIT} (${PATCH_REF} on ${UPSTREAM_TAG}). Nothing was published."
+          {
+            echo "## :x: Gate failed: \`make verify\` on \`${COMMIT}\`"
+            echo
+            echo "\`${PATCH_REF}\` rebased onto \`${UPSTREAM_TAG}\` does not pass the repository gate. Nothing was published."
+            echo
+            echo "- If the failure is in the patch: fix it on \`${PATCH_REF}\` (still exactly one commit), run \`make verify\` locally, force-push, and re-run."
+            echo "- If it is an upstream flake: re-run the failed jobs."
+            echo "- If upstream itself is red at \`${UPSTREAM_TAG}\`: wait for the next upstream release, or dispatch with an older \`upstream_tag\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  tag:
+    name: Push git tag
+    needs: [prepare, gate]
+    if: needs.prepare.outputs.push_tag == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      UPSTREAM_COMMIT: ${{ needs.prepare.outputs.upstream_commit }}
+      COMMIT: ${{ needs.prepare.outputs.commit }}
+      TREE: ${{ needs.prepare.outputs.tree }}
+      BUNDLE: ${{ github.workspace }}/bundle/sync.bundle
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ci
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sync-bundle
+          path: bundle
+
+      - name: Materialize the planned commit (full history)
+        run: ci/.github/scripts/materialize.sh src --full
+
+      - name: Create and push the git tag
+        env:
+          FORK_REPO: ${{ github.repository }}
+          GIT_TAG: ${{ needs.prepare.outputs.git_tag }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          PATCH_REF: ${{ needs.prepare.outputs.patch_ref }}
+          PATCH_COMMIT: ${{ needs.prepare.outputs.patch_commit }}
+          REBASE: ${{ needs.prepare.outputs.rebase }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Optional token with the `workflows` permission; see README.md.
+          PUSH_TOKEN: ${{ secrets.HOMELAB_SYNC_TOKEN || github.token }}
+          TOKEN_NAME: ${{ secrets.HOMELAB_SYNC_TOKEN != '' && 'HOMELAB_SYNC_TOKEN' || 'GITHUB_TOKEN' }}
+        run: ci/.github/scripts/push-tag.sh src
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [prepare, gate, tag]
+    if: >-
+      ${{ !cancelled() &&
+      needs.prepare.outputs.need_build == 'true' &&
+      needs.gate.result == 'success' &&
+      (needs.tag.result == 'success' ||
+      (needs.tag.result == 'skipped' && needs.prepare.outputs.push_tag != 'true')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [web, api, worker, maintenance, migrations]
+    env:
+      NAME: ${{ matrix.name }}
+      UPSTREAM_COMMIT: ${{ needs.prepare.outputs.upstream_commit }}
+      COMMIT: ${{ needs.prepare.outputs.commit }}
+      TREE: ${{ needs.prepare.outputs.tree }}
+      BUNDLE: ${{ github.workspace }}/bundle/sync.bundle
+      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ci
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sync-bundle
+          path: bundle
+
+      - name: Materialize the planned commit
+        run: ci/.github/scripts/materialize.sh src
+
+      - name: Check git tag and image tag
+        id: preflight
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}
+          GIT_TAG: ${{ needs.prepare.outputs.git_tag }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          FORK_REPO: ${{ github.repository }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: ci/.github/scripts/preflight.sh
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.preflight.outputs.skip != 'true'
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: env.DRY_RUN != 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: env.DRY_RUN != 'true'
+
+      - name: Build and publish image
+        id: build
+        if: steps.preflight.outputs.skip != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: src
+          file: src/Dockerfile
+          target: ${{ matrix.name }}
+          platforms: linux/amd64,linux/arm64
+          provenance: mode=max
+          sbom: true
+          push: ${{ env.DRY_RUN != 'true' }}
+          tags: ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}:${{ needs.prepare.outputs.image_tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.commit }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.image_tag }}
+            org.opencontainers.image.title=omnara-${{ matrix.name }}
+            org.opencontainers.image.licenses=Apache-2.0
+            io.github.${{ github.repository_owner }}.omnara.upstream-repository=${{ github.server_url }}/${{ env.UPSTREAM_REPO }}
+            io.github.${{ github.repository_owner }}.omnara.upstream-tag=${{ needs.prepare.outputs.upstream_tag }}
+            io.github.${{ github.repository_owner }}.omnara.upstream-commit=${{ needs.prepare.outputs.upstream_commit }}
+            io.github.${{ github.repository_owner }}.omnara.patch-commit=${{ needs.prepare.outputs.patch_commit }}
+          annotations: |
+            index:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            index:org.opencontainers.image.revision=${{ needs.prepare.outputs.commit }}
+            index:org.opencontainers.image.version=${{ needs.prepare.outputs.image_tag }}
+            index:org.opencontainers.image.licenses=Apache-2.0
+            index:org.opencontainers.image.description=Omnara ${{ matrix.name }} from upstream ${{ needs.prepare.outputs.upstream_tag }} plus the OMNARA_OUTBOUND_ALLOWED_CIDRS patch. Built from ${{ github.repository }} tag ${{ needs.prepare.outputs.git_tag }}.
+            index:io.github.${{ github.repository_owner }}.omnara.upstream-tag=${{ needs.prepare.outputs.upstream_tag }}
+            index:io.github.${{ github.repository_owner }}.omnara.upstream-commit=${{ needs.prepare.outputs.upstream_commit }}
+
+      - name: Sign image
+        if: env.DRY_RUN != 'true' && steps.preflight.outputs.skip != 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Resume: an image pushed by an earlier, interrupted run may be unsigned.
+      - name: Sign existing image if unsigned
+        if: env.DRY_RUN != 'true' && steps.preflight.outputs.skip == 'true'
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}
+          IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/upstream-sync.yaml@refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          digest=$(docker buildx imagetools inspect "${IMAGE}:${IMAGE_TAG}" --format '{{json .Manifest}}' | jq -r .digest)
+          if cosign verify --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${digest}" >/dev/null; then
+            echo "${IMAGE}@${digest} is already signed."
+          else
+            cosign sign --yes "${IMAGE}@${digest}"
+          fi
+
+      - name: Record digest
+        if: steps.preflight.outputs.skip != 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}
+        run: |
+          mkdir -p digests
+          printf '%s\n' "$DIGEST" > "digests/${NAME}"
+          if [ "$DRY_RUN" = true ]; then
+            echo "- DRY RUN, not pushed: \`${IMAGE}:${IMAGE_TAG}\` (local index digest \`${DIGEST}\`)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Pushed \`${IMAGE}:${IMAGE_TAG}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.DRY_RUN != 'true' && steps.preflight.outputs.skip != 'true'
+        with:
+          name: digest-${{ matrix.name }}
+          path: digests/${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    name: Verify anonymous pull
+    needs: [prepare, build]
+    if: >-
+      ${{ !cancelled() &&
+      needs.prepare.result == 'success' &&
+      needs.prepare.outputs.dry_run == 'false' &&
+      (needs.build.result == 'success' ||
+      (needs.build.result == 'skipped' && needs.prepare.outputs.need_build == 'false')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ci
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.prepare.outputs.mode != 'noop'
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Verify every image anonymously
+        env:
+          IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+          OWNER: ${{ github.repository_owner }}
+          DIGEST_DIR: digests
+          MODE: ${{ needs.prepare.outputs.mode }}
+          GIT_TAG: ${{ needs.prepare.outputs.git_tag }}
+        run: |
+          if [ "$MODE" = noop ]; then
+            echo "## :white_check_mark: Up to date: \`${GIT_TAG}\` is already published" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          ci/.github/scripts/verify-public.sh
