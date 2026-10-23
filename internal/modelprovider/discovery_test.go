@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -80,7 +81,7 @@ func TestDiscoverModelsOpenAIBearer(t *testing.T) {
 		modelstore.ModelProviderAuthKindBearerToken,
 		`{}`,
 	)
-	models, err := DiscoverModels(context.Background(), config, "sk-good", nil, true)
+	models, err := DiscoverModels(context.Background(), config, "sk-good", nil, true, nil)
 	if err != nil {
 		t.Fatalf("DiscoverModels: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestDiscoverModelsOpenAIBearer(t *testing.T) {
 		t.Fatalf("unexpected models: %+v", models)
 	}
 
-	_, err = DiscoverModels(context.Background(), config, "sk-bad", nil, true)
+	_, err = DiscoverModels(context.Background(), config, "sk-bad", nil, true, nil)
 	if err == nil || !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "invalid api key") {
 		t.Fatalf("expected 401 error with provider message, got %v", err)
 	}
@@ -111,7 +112,7 @@ func TestDiscoverModelsSendsProviderHeadersWithoutOverridingAuth(t *testing.T) {
 		`{}`,
 	)
 	headers := map[string]string{"X-Gateway-Key": "gw-secret", "Authorization": "Bearer custom"}
-	if _, err := DiscoverModels(context.Background(), config, "sk-good", headers, true); err != nil {
+	if _, err := DiscoverModels(context.Background(), config, "sk-good", headers, true, nil); err != nil {
 		t.Fatalf("DiscoverModels: %v", err)
 	}
 }
@@ -162,7 +163,7 @@ func TestBedrockDiscoveryValidatesSharedCatalogWithoutReturningModels(t *testing
 				)),
 			)
 			config.APIVariant = modelprotocol.APIVariantBedrock
-			models, err := DiscoverModels(context.Background(), config, "bedrock-key", nil, true)
+			models, err := DiscoverModels(context.Background(), config, "bedrock-key", nil, true, nil)
 			if err != nil {
 				t.Fatalf("DiscoverModels: %v", err)
 			}
@@ -193,7 +194,7 @@ func TestDiscoverModelsNormalizesMalformedLimitsAndDuplicateSlugs(t *testing.T) 
 		modelstore.ModelProviderAuthKindBearerToken,
 		`{}`,
 	)
-	models, err := DiscoverModels(context.Background(), config, "sk", nil, true)
+	models, err := DiscoverModels(context.Background(), config, "sk", nil, true, nil)
 	if err != nil {
 		t.Fatalf("DiscoverModels: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestDiscoverModelsAnthropicHeadersAndDisplayNames(t *testing.T) {
 		modelstore.ModelProviderAuthKindAPIKeyHeader,
 		`{"header_name":"x-api-key"}`,
 	)
-	models, err := DiscoverModels(context.Background(), config, "sk-ant", nil, true)
+	models, err := DiscoverModels(context.Background(), config, "sk-ant", nil, true, nil)
 	if err != nil {
 		t.Fatalf("DiscoverModels: %v", err)
 	}
@@ -285,7 +286,7 @@ func TestDiscoverModelsAnthropicReasoningEfforts(t *testing.T) {
 		modelstore.ModelProviderAuthKindAPIKeyHeader,
 		`{"header_name":"x-api-key"}`,
 	)
-	models, err := DiscoverModels(context.Background(), config, "sk-ant", nil, true)
+	models, err := DiscoverModels(context.Background(), config, "sk-ant", nil, true, nil)
 	if err != nil {
 		t.Fatalf("DiscoverModels: %v", err)
 	}
@@ -350,7 +351,7 @@ func TestDiscoverModelsOpenRouterCapabilityMetadata(t *testing.T) {
 		`{}`,
 	)
 	config.APIVariant = modelprotocol.APIVariantOpenRouter
-	models, err := DiscoverModels(context.Background(), config, "sk-or", nil, true)
+	models, err := DiscoverModels(context.Background(), config, "sk-or", nil, true, nil)
 	if err != nil {
 		t.Fatalf("DiscoverModels: %v", err)
 	}
@@ -383,7 +384,7 @@ func TestDiscoverModelsOpenRouterCapabilityMetadata(t *testing.T) {
 		t.Fatalf("model without the reasoning parameter should not support reasoning: %+v", models[1])
 	}
 
-	if _, err := DiscoverModels(context.Background(), config, "sk-bad", nil, true); err == nil ||
+	if _, err := DiscoverModels(context.Background(), config, "sk-bad", nil, true, nil); err == nil ||
 		!strings.Contains(err.Error(), "OpenRouter key endpoint returned status 401") {
 		t.Fatalf("expected OpenRouter key validation error, got %v", err)
 	}
@@ -410,7 +411,7 @@ func TestDiscoverModelsRejectsUnrecognizedResponse(t *testing.T) {
 				modelstore.ModelProviderAuthKindBearerToken,
 				`{}`,
 			)
-			if _, err := DiscoverModels(context.Background(), config, "sk", nil, true); err == nil {
+			if _, err := DiscoverModels(context.Background(), config, "sk", nil, true, nil); err == nil {
 				t.Fatalf("expected error for response %s", response)
 			}
 		})
@@ -430,7 +431,7 @@ func TestDiscoverModelsAcceptsEmptyDataArray(t *testing.T) {
 		modelstore.ModelProviderAuthKindBearerToken,
 		`{}`,
 	)
-	models, err := DiscoverModels(context.Background(), config, "sk", nil, true)
+	models, err := DiscoverModels(context.Background(), config, "sk", nil, true, nil)
 	if err != nil {
 		t.Fatalf("DiscoverModels: %v", err)
 	}
@@ -452,7 +453,26 @@ func TestDiscoverModelsBlocksLoopbackWithoutInsecureDev(t *testing.T) {
 		modelstore.ModelProviderAuthKindBearerToken,
 		`{}`,
 	)
-	if _, err := DiscoverModels(context.Background(), config, "sk", nil, false); err == nil {
+	if _, err := DiscoverModels(context.Background(), config, "sk", nil, false, nil); err == nil {
 		t.Fatal("expected loopback models endpoint to be blocked outside insecure dev mode")
+	}
+}
+
+func TestDiscoverModelsReachesAllowlistedPrefixWithoutInsecureDev(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+
+	config := discoveryProviderConfig(
+		server.URL+"/v1",
+		modelprotocol.APIFormatOpenAIResponses,
+		modelstore.ModelProviderAuthKindBearerToken,
+		`{}`,
+	)
+	allowed := []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	if _, err := DiscoverModels(context.Background(), config, "sk", nil, false, allowed); err != nil {
+		t.Fatalf("DiscoverModels with allowlisted loopback: %v", err)
 	}
 }

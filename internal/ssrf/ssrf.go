@@ -2,8 +2,10 @@ package ssrf
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 )
 
 var ErrBlockedAddress = errors.New("ssrf: address blocked")
@@ -29,6 +31,95 @@ func IsAllowedIP(ip net.IP, allowLoopback bool) bool {
 		}
 	}
 	return true
+}
+
+// IsAllowedIPWithPrefixes reports whether ip passes IsAllowedIP or falls
+// inside one of the operator-allowed prefixes. Addresses in
+// reservedAllowlistPrefixes (link-local, multicast, unspecified, and IPv6 forms
+// that embed IPv4) never match, even when allowed was not built by
+// ParseAllowedPrefixes. IPv4-mapped IPv6 addresses match IPv4 prefixes.
+func IsAllowedIPWithPrefixes(ip net.IP, allowLoopback bool, allowed []netip.Prefix) bool {
+	if IsAllowedIP(ip, allowLoopback) {
+		return true
+	}
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	for _, reserved := range reservedAllowlistPrefixes {
+		if reserved.Contains(address) {
+			return false
+		}
+	}
+	for _, prefix := range allowed {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseAllowedPrefixes parses operator-supplied CIDRs for
+// TransportOptions.AllowedPrefixes. Blank entries are skipped. A prefix that
+// covers every address, or overlaps loopback or any of
+// reservedAllowlistPrefixes, is rejected: IPv4 destinations must be listed in
+// plain IPv4 form, and loopback stays behind the caller's allowLoopback switch
+// so an allowlist never exposes the process's own listeners.
+func ParseAllowedPrefixes(cidrs []string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	for _, cidr := range cidrs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR: %w", err)
+		}
+		prefix = prefix.Masked()
+		if prefix.Bits() == 0 {
+			return nil, fmt.Errorf("CIDR %q allows every address", cidr)
+		}
+		for _, loopback := range loopbackPrefixes {
+			if prefix.Overlaps(loopback) {
+				return nil, fmt.Errorf("CIDR %q overlaps loopback range %s", cidr, loopback)
+			}
+		}
+		for _, reserved := range reservedAllowlistPrefixes {
+			if prefix.Overlaps(reserved) {
+				return nil, fmt.Errorf("CIDR %q overlaps reserved range %s", cidr, reserved)
+			}
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+// reservedAllowlistPrefixes can never be opened by an operator allowlist:
+// unspecified, link-local (including cloud metadata), and multicast ranges,
+// plus the IPv6 forms that embed an IPv4 address and could otherwise smuggle a
+// link-local IPv4 destination past the IPv4 checks. ::/96 also covers the IPv6
+// unspecified address. Network-specific NAT64 prefixes (RFC 6052) cannot be
+// recognized here, so operators must not list their own NAT64 prefix.
+var reservedAllowlistPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/32"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("::ffff:0:0/96"),
+	ipv4CompatibleIPv6,
+	nat64WellKnownIPv6,
+	nat64LocalUseIPv6,
+	sixToFourIPv6,
+}
+
+// loopbackPrefixes are rejected by ParseAllowedPrefixes only; dialing loopback
+// remains governed by the allowLoopback development switch.
+var loopbackPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("::1/128"),
 }
 
 // blockedPrefixes supplements net.IP's broad classifications with a
@@ -59,6 +150,7 @@ var blockedPrefixes = []netip.Prefix{
 var (
 	ipv4CompatibleIPv6 = netip.MustParsePrefix("::/96")
 	nat64WellKnownIPv6 = netip.MustParsePrefix("64:ff9b::/96")
+	nat64LocalUseIPv6  = netip.MustParsePrefix("64:ff9b:1::/48")
 	sixToFourIPv6      = netip.MustParsePrefix("2002::/16")
 )
 
