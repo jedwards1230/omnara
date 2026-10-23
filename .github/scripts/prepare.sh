@@ -115,7 +115,7 @@ else
 			"git switch ${PATCH_REF}" \
 			"git rebase --onto ${UPSTREAM_TAG} HEAD~1   # resolve, then: make verify" \
 			"git push --force-with-lease origin ${PATCH_REF}" \
-			"gh workflow run upstream-sync.yaml -R ${FORK_REPO}" \
+			"gh workflow run upstream-sync.yaml -R ${FORK_REPO} -f upstream_tag=${UPSTREAM_TAG} -f patch_ref=${PATCH_REF}" \
 			'```'
 	elif [[ $merge_status -ne 0 ]]; then
 		fail "git merge-tree failed" '```' "$merge_out" '```'

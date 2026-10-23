@@ -376,13 +376,17 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
           IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}
         run: |
+          if [ "$DRY_RUN" = true ]; then
+            echo "- DRY RUN: built \`${IMAGE}:${IMAGE_TAG}\` for linux/amd64 and linux/arm64, not pushed" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -z "$DIGEST" ]; then
+            echo "::error title=No digest::The build of ${IMAGE}:${IMAGE_TAG} reported no index digest."
+            exit 1
+          fi
           mkdir -p digests
           printf '%s\n' "$DIGEST" > "digests/${NAME}"
-          if [ "$DRY_RUN" = true ]; then
-            echo "- DRY RUN, not pushed: \`${IMAGE}:${IMAGE_TAG}\` (local index digest \`${DIGEST}\`)" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- Pushed \`${IMAGE}:${IMAGE_TAG}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "- Pushed \`${IMAGE}:${IMAGE_TAG}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: env.DRY_RUN != 'true' && steps.preflight.outputs.skip != 'true'
