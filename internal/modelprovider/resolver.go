@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +33,9 @@ type Resolver struct {
 	AllowLoopback         bool
 	SigV4CredentialCache  *sigv4.CredentialCache
 	OpenRouterAttribution OpenRouterAttribution
+	// AllowedPrefixes lets provider requests reach operator-listed private
+	// destinations (OMNARA_OUTBOUND_ALLOWED_CIDRS); see ssrf.ParseAllowedPrefixes.
+	AllowedPrefixes []netip.Prefix
 }
 
 type OpenRouterAttribution struct {
@@ -44,6 +49,12 @@ var (
 	loopbackHTTPTransport = ssrf.NewTransport(
 		ssrf.TransportOptions{AllowLoopback: true, DisableResponseHeaderTimeout: true},
 	)
+
+	// allowlistedHTTPTransports shares one transport, and so one connection
+	// pool, per distinct operator allowlist, like the two defaults above. A
+	// process only ever configures one or two distinct lists.
+	allowlistedHTTPTransportsMu sync.Mutex
+	allowlistedHTTPTransports   = map[string]*http.Transport{}
 )
 
 func (r Resolver) Resolve(ctx context.Context, selection model.Selection) (model.ResolvedClient, error) {
@@ -411,7 +422,7 @@ func (r Resolver) sigV4RouteAuth(
 func (r Resolver) httpClientForProviderConfig(
 	providerConfig modelstore.ModelProviderConfigRecord,
 ) (*http.Client, error) {
-	base := newSSRFHTTPClient(r.AllowLoopback)
+	base := newSSRFHTTPClient(r.AllowLoopback, r.AllowedPrefixes)
 	base.Timeout = time.Duration(providerConfig.RequestTimeoutMS) * time.Millisecond
 	if r.HTTPRecorder == nil {
 		return base, nil
@@ -423,11 +434,30 @@ func (r Resolver) httpClientForProviderConfig(
 	), nil
 }
 
-func newSSRFHTTPClient(allowLoopback bool) *http.Client {
+func newSSRFHTTPClient(allowLoopback bool, allowedPrefixes []netip.Prefix) *http.Client {
+	if len(allowedPrefixes) > 0 {
+		return &http.Client{Transport: allowlistedHTTPTransport(allowLoopback, allowedPrefixes)}
+	}
 	if allowLoopback {
 		return &http.Client{Transport: loopbackHTTPTransport}
 	}
 	return &http.Client{Transport: defaultHTTPTransport}
+}
+
+func allowlistedHTTPTransport(allowLoopback bool, allowedPrefixes []netip.Prefix) *http.Transport {
+	key := fmt.Sprint(allowLoopback, allowedPrefixes)
+	allowlistedHTTPTransportsMu.Lock()
+	defer allowlistedHTTPTransportsMu.Unlock()
+	transport, ok := allowlistedHTTPTransports[key]
+	if !ok {
+		transport = ssrf.NewTransport(ssrf.TransportOptions{
+			AllowLoopback:                allowLoopback,
+			DisableResponseHeaderTimeout: true,
+			AllowedPrefixes:              allowedPrefixes,
+		})
+		allowlistedHTTPTransports[key] = transport
+	}
+	return transport
 }
 
 func capabilitiesForRevision(record modelstore.ConfiguredModelRevisionRecord) model.Capabilities {

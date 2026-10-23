@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,6 +68,7 @@ type Server struct {
 	agentStreamRecorder                 *metrics.AgentStreamRecorder
 	agentConfigOptions                  agentconfig.CompileOptions
 	allowInsecureModelProviderEndpoints bool
+	outboundAllowedPrefixes             []netip.Prefix
 	modelDiscoverer                     modelprovider.DiscoverFunc
 	allowInsecureLocalHostBypass        bool
 	defaultPools                        []executionstore.DefaultMachinePoolTemplate
@@ -355,6 +357,15 @@ func WithAllowInsecureModelProviderEndpoints() Option {
 	}
 }
 
+// WithOutboundAllowedPrefixes lets model provider and MCP requests, including
+// MCP OAuth, reach the operator-listed private prefixes from
+// OMNARA_OUTBOUND_ALLOWED_CIDRS. No other outbound client uses them.
+func WithOutboundAllowedPrefixes(prefixes []netip.Prefix) Option {
+	return func(s *Server) {
+		s.outboundAllowedPrefixes = prefixes
+	}
+}
+
 func WithModelDiscoverer(discoverer modelprovider.DiscoverFunc) Option {
 	return func(s *Server) {
 		s.modelDiscoverer = discoverer
@@ -411,6 +422,9 @@ func New(log *slog.Logger, store *storage.Store, opts ...Option) (*Server, error
 	for _, opt := range opts {
 		opt(server)
 	}
+	// Applied after the options because WithAgentConfigOptions replaces the
+	// whole struct, and cmd/api passes it only in insecure dev mode.
+	server.agentConfigOptions.OutboundAllowedPrefixes = server.outboundAllowedPrefixes
 	gitHTTPClient := server.githubClientConfig.HTTPClient
 	if gitHTTPClient == nil {
 		gitHTTPClient = server.integrationHTTPClient
@@ -496,7 +510,8 @@ func New(log *slog.Logger, store *storage.Store, opts ...Option) (*Server, error
 		}
 	}
 	server.mcpOAuthHTTPClient = outboundhttp.NewPublicClient(outboundhttp.PublicClientOptions{
-		AllowLoopback: server.agentConfigOptions.AllowInsecureLocalMCPHTTP,
+		AllowLoopback:   server.agentConfigOptions.AllowInsecureLocalMCPHTTP,
+		AllowedPrefixes: server.outboundAllowedPrefixes,
 	})
 	server.mcpClient = mcp.New(mcp.Options{HTTPClient: server.mcpOAuthHTTPClient})
 	server.sigV4CredentialCache, err = sigv4.NewCredentialCache()

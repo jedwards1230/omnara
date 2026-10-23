@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
+	"slices"
 	"time"
 )
 
@@ -15,6 +17,11 @@ type TransportOptions struct {
 	ResponseHeaderTimeout        time.Duration
 	DisableResponseHeaderTimeout bool
 	IdleConnTimeout              time.Duration
+	// AllowedPrefixes admits otherwise-blocked destinations, such as a private
+	// model gateway, after DNS resolution. Build it with ParseAllowedPrefixes;
+	// reserved ranges such as link-local never match. The zero value admits
+	// nothing beyond IsAllowedIP.
+	AllowedPrefixes []netip.Prefix
 }
 
 func NewTransport(opts TransportOptions) *http.Transport {
@@ -31,9 +38,10 @@ func NewTransport(opts TransportOptions) *http.Transport {
 		opts.IdleConnTimeout = 90 * time.Second
 	}
 	dialer := &net.Dialer{Timeout: opts.DialTimeout, KeepAlive: 30 * time.Second}
+	allowedPrefixes := slices.Clone(opts.AllowedPrefixes)
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return Dial(ctx, dialer, network, addr, opts.AllowLoopback)
+			return dial(ctx, dialer, network, addr, opts.AllowLoopback, allowedPrefixes)
 		},
 		TLSHandshakeTimeout:   opts.TLSHandshakeTimeout,
 		ResponseHeaderTimeout: opts.ResponseHeaderTimeout,
@@ -47,12 +55,24 @@ func NewTransport(opts TransportOptions) *http.Transport {
 }
 
 func Dial(ctx context.Context, dialer *net.Dialer, network, addr string, allowLoopback bool) (net.Conn, error) {
+	return dial(ctx, dialer, network, addr, allowLoopback, nil)
+}
+
+// dial resolves addr, then dials the first address that IsAllowedIPWithPrefixes
+// admits, pinned so a second lookup cannot rebind the connection.
+func dial(
+	ctx context.Context,
+	dialer *net.Dialer,
+	network, addr string,
+	allowLoopback bool,
+	allowedPrefixes []netip.Prefix,
+) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if !IsAllowedIP(ip, allowLoopback) {
+		if !IsAllowedIPWithPrefixes(ip, allowLoopback, allowedPrefixes) {
 			return nil, fmt.Errorf("%w: %s", ErrBlockedAddress, ip)
 		}
 		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
@@ -62,7 +82,7 @@ func Dial(ctx context.Context, dialer *net.Dialer, network, addr string, allowLo
 		return nil, err
 	}
 	for _, a := range addrs {
-		if IsAllowedIP(a.IP, allowLoopback) {
+		if IsAllowedIPWithPrefixes(a.IP, allowLoopback, allowedPrefixes) {
 			return dialer.DialContext(ctx, network, net.JoinHostPort(a.IP.String(), port))
 		}
 	}

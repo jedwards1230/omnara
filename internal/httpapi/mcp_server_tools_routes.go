@@ -38,7 +38,11 @@ func (s strictOpenAPIServer) ListMCPServerTools(
 	if request.Body == nil {
 		return nil, apierror.FromCode(openapi.ErrorCodeInvalidRequest, "request body is required")
 	}
-	endpoint, err := agentconfig.ValidateMCPURL(request.Body.Url, s.server.agentConfigOptions.AllowInsecureLocalMCPHTTP)
+	endpoint, err := agentconfig.ValidateMCPURL(
+		request.Body.Url,
+		s.server.agentConfigOptions.AllowInsecureLocalMCPHTTP,
+		s.server.agentConfigOptions.OutboundAllowedPrefixes,
+	)
 	if err != nil {
 		return nil, apierror.FromCode(openapi.ErrorCodeInvalidRequest, "url is invalid: "+err.Error())
 	}
