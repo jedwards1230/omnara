@@ -409,6 +409,10 @@ func apiOptions(
 	if err != nil {
 		return nil, err
 	}
+	outboundAllowedPrefixes, err := cfg.OutboundAllowedPrefixes()
+	if err != nil {
+		return nil, err
+	}
 	opts := []httpapi.Option{
 		httpapi.WithHTTPRecorder(metrics.NewHTTPRecorder(metricSet, metrics.SubsystemAPI)),
 		httpapi.WithIntegrationInboxIntakeRecorder(metrics.NewIntegrationInboxIntakeRecorder(metricSet)),
@@ -500,6 +504,7 @@ func apiOptions(
 		cfg.APIRateLimitBurst,
 	))
 	opts = append(opts, httpapi.WithTrustedProxyCIDRs(cfg.TrustedProxyCIDRs))
+	opts = append(opts, httpapi.WithOutboundAllowedPrefixes(outboundAllowedPrefixes))
 	return opts, nil
 }
 

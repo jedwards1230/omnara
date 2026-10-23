@@ -21,11 +21,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/omnara-ai/omnara/internal/config"
 	"github.com/omnara-ai/omnara/internal/httpapi/openapi"
 	"github.com/omnara-ai/omnara/internal/httpapi/publicevents"
 	"github.com/omnara-ai/omnara/internal/notifications"
 	"github.com/omnara-ai/omnara/internal/outboundhttp"
 	"github.com/omnara-ai/omnara/internal/publicid"
+	"github.com/omnara-ai/omnara/internal/ssrf"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 	"github.com/stretchr/testify/require"
@@ -256,6 +258,43 @@ func TestSenderBlocksPrivateDestinationsAndRedirects(t *testing.T) {
 	sender.client = outboundhttp.CloneWithoutRedirects(redirect.Client())
 	require.ErrorContains(t, sender.send(t.Context(), delivery), "HTTP 307")
 	require.Zero(t, calls.Load())
+}
+
+// TestSenderIgnoresOutboundAllowedCIDRs proves the operator allowlist for model
+// providers and MCP never opens event webhooks: the same configured prefix that
+// lets the worker's MCP client reach a loopback server leaves the sender blocked.
+func TestSenderIgnoresOutboundAllowedCIDRs(t *testing.T) {
+	t.Setenv("OMNARA_ALLOW_INSECURE_DEV_DEFAULTS", "0")
+	t.Setenv("OMNARA_OUTBOUND_ALLOWED_CIDRS", "127.0.0.1/32")
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	prefixes, err := cfg.OutboundAllowedPrefixes()
+	require.NoError(t, err)
+	require.Len(t, prefixes, 1)
+	var calls atomic.Int64
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer destination.Close()
+
+	// testSender builds the sender with New, exactly as cmd/worker does.
+	sender, store, delivery := testSender()
+	store.target.URL = destination.URL
+	err = sender.send(t.Context(), delivery)
+	require.ErrorIs(t, err, ssrf.ErrBlockedAddress)
+	require.Zero(t, calls.Load())
+
+	// Built exactly as cmd/worker builds the MCP client: the allowlist applies.
+	mcpHTTPClient := outboundhttp.NewPublicClient(
+		outboundhttp.PublicClientOptions{AllowLoopback: cfg.AllowInsecureDev, AllowedPrefixes: prefixes},
+	)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, destination.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := mcpHTTPClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, int64(1), calls.Load())
 }
 
 func TestSenderTimeoutAndShutdownLeaveClaimsRecoverable(t *testing.T) {

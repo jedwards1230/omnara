@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -972,6 +973,7 @@ func TestModelProviderConfigRoutesRejectLocalEndpointsOutsideInsecureDev(t *test
 			string,
 			map[string]string,
 			bool,
+			[]netip.Prefix,
 		) ([]modelprovider.DiscoveredModel, error) {
 			return nil, errors.New("model discovery is disabled in integration tests")
 		}),

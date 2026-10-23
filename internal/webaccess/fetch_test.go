@@ -7,8 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/omnara-ai/omnara/internal/config"
+	"github.com/omnara-ai/omnara/internal/outboundhttp"
 )
 
 func devFetcher() *Fetcher {
@@ -402,6 +406,56 @@ func TestFetchSSRFBlocksPrivateAddresses(t *testing.T) {
 		if !strings.Contains(providerErr.Message, "run_command") {
 			t.Fatalf("%s: blocked error must include run_command guidance, got %q", target, providerErr.Message)
 		}
+	}
+}
+
+// TestFetchSSRFIgnoresOutboundAllowedCIDRs proves the operator allowlist for
+// model providers and MCP never opens web_fetch: the same configured prefix that
+// lets the worker's MCP client reach a loopback server leaves web_fetch blocked.
+func TestFetchSSRFIgnoresOutboundAllowedCIDRs(t *testing.T) {
+	t.Setenv("OMNARA_ALLOW_INSECURE_DEV_DEFAULTS", "0")
+	t.Setenv("OMNARA_OUTBOUND_ALLOWED_CIDRS", "127.0.0.1/32")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	prefixes, err := cfg.OutboundAllowedPrefixes()
+	if err != nil || len(prefixes) != 1 {
+		t.Fatalf("outbound allowed prefixes = %v, %v; want one prefix", prefixes, err)
+	}
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	// Built exactly as cmd/worker builds web_fetch.
+	fetcher := NewFetcher(FetcherOptions{AllowLoopback: cfg.AllowInsecureDev})
+	_, err = fetcher.Fetch(t.Context(), FetchRequest{URL: server.URL, TimeoutSeconds: 5})
+	providerErr, ok := AsProviderError(err)
+	if !ok || providerErr.Code != ErrorCodeFetchBlocked {
+		t.Fatalf("web_fetch with allowlisted target: got %v, want %s", err, ErrorCodeFetchBlocked)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("web_fetch reached the server %d times, want 0", calls.Load())
+	}
+
+	// Built exactly as cmd/worker builds the MCP client: the allowlist applies.
+	mcpHTTPClient := outboundhttp.NewPublicClient(
+		outboundhttp.PublicClientOptions{AllowLoopback: cfg.AllowInsecureDev, AllowedPrefixes: prefixes},
+	)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := mcpHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("MCP client with allowlisted target: %v", err)
+	}
+	_ = resp.Body.Close()
+	if calls.Load() != 1 {
+		t.Fatalf("MCP client reached the server %d times, want 1", calls.Load())
 	}
 }
 

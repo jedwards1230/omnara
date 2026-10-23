@@ -571,6 +571,75 @@ func TestValidateAPITrustedProxyCIDRs(t *testing.T) {
 	}
 }
 
+func TestValidateOutboundAllowedCIDRs(t *testing.T) {
+	t.Setenv("OMNARA_DATABASE_URL", "postgres://example/db")
+	t.Setenv("OMNARA_REDIS_URL", "redis://example:6379")
+	t.Setenv("OMNARA_PUBLIC_URL", "https://app.example.com")
+	t.Setenv("OMNARA_SECRET_ENCRYPTION_KEYS", testSecretEncryptionKeys())
+	t.Setenv("OMNARA_SECRET_ENCRYPTION_ACTIVE_KEY_ID", "test-key")
+	t.Setenv("OMNARA_SKILL_DOWNLOAD_SIGNING_KEY", testSkillDownloadSigningKey())
+	t.Setenv("OMNARA_BLOB_S3_BUCKET", "omnara-prod")
+	t.Setenv("OMNARA_MEMORY_DIR", t.TempDir())
+	t.Setenv("OMNARA_EMAIL_DRIVER", "smtp")
+	t.Setenv("OMNARA_SMTP_ADDR", "smtp.example.com:587")
+	t.Setenv("OMNARA_EMAIL_FROM", "noreply@example.com")
+	t.Setenv("OMNARA_MAINTENANCE_INTERVAL", "2s")
+
+	validators := map[string]func(Config) error{
+		"api":    Config.ValidateAPI,
+		"worker": Config.ValidateWorker,
+	}
+	tests := []struct {
+		name    string
+		value   string
+		want    []string
+		wantErr bool
+	}{
+		{name: "unset"},
+		{name: "single", value: "10.0.0.5/32", want: []string{"10.0.0.5/32"}},
+		{name: "multiple with whitespace", value: " 10.0.0.5/32 , fd00::/8,", want: []string{"10.0.0.5/32", "fd00::/8"}},
+		{name: "invalid", value: "not-a-cidr", wantErr: true},
+		{name: "metadata", value: "10.0.0.5/32,169.254.169.254/32", wantErr: true},
+		{name: "everything", value: "0.0.0.0/0", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OMNARA_OUTBOUND_ALLOWED_CIDRS", tc.value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			for name, validate := range validators {
+				err := validate(cfg)
+				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "OMNARA_OUTBOUND_ALLOWED_CIDRS")) {
+					t.Fatalf("%s: expected OMNARA_OUTBOUND_ALLOWED_CIDRS error, got %v", name, err)
+				}
+				if !tc.wantErr && err != nil {
+					t.Fatalf("%s: validate: %v", name, err)
+				}
+			}
+			if err := cfg.ValidateMaintenance(); err != nil {
+				t.Fatalf("maintenance must ignore OMNARA_OUTBOUND_ALLOWED_CIDRS: %v", err)
+			}
+			if tc.wantErr {
+				return
+			}
+			prefixes, err := cfg.OutboundAllowedPrefixes()
+			if err != nil {
+				t.Fatalf("outbound allowed prefixes: %v", err)
+			}
+			if len(prefixes) != len(tc.want) {
+				t.Fatalf("prefixes = %v, want %v", prefixes, tc.want)
+			}
+			for i, prefix := range prefixes {
+				if prefix.String() != tc.want[i] {
+					t.Fatalf("prefixes[%d] = %s, want %s", i, prefix, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestLoadAPIRateLimitDefaults(t *testing.T) {
 	t.Setenv("OMNARA_ALLOW_INSECURE_DEV_DEFAULTS", "1")
 	t.Setenv("OMNARA_API_RATE_LIMIT_READS_PER_HOUR", "")

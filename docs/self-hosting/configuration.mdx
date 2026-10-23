@@ -168,6 +168,23 @@ timeout. Explicit values in `OMNARA_DATABASE_URL` take precedence.
 | `OMNARA_WEB_SERVING` | `embedded` serves a SPA compiled into `cmd/api`; `disabled` leaves web assets to a separate service. The official cluster API image contains no frontend assets and sets this to `disabled`; the cluster web image serves only static assets and does not proxy API traffic. | `disabled` | No |
 | `OMNARA_TRUSTED_PROXY_CIDRS` | Comma-separated proxy/load-balancer hop CIDRs whose `X-Forwarded-For`/`X-Real-IP` are trusted for auth rate limiting. Only hops you control. | — | No |
 
+## Outbound network policy
+
+Outbound requests whose destination users can choose, such as model provider endpoints, MCP servers, `web_fetch`, and event webhooks, reach only public addresses. Omnara checks every resolved IP when it connects and refuses private, CGNAT, loopback, link-local, and other special-use addresses.
+
+| Variable | Purpose | Default | Required |
+| --- | --- | --- | --- |
+| `OMNARA_OUTBOUND_ALLOWED_CIDRS` | Comma-separated CIDRs that model provider and MCP requests may reach even though they are private, for example `10.0.0.5/32,192.0.2.10/32`. Set the same value on `api` and `worker`. An invalid or rejected entry fails startup. | — | No |
+
+The allowlist is set by the operator for the whole deployment and cannot be configured per org. When it is empty, nothing changes. It applies only to:
+
+- model provider requests and model catalog discovery
+- MCP server connections and MCP OAuth, including the OAuth metadata, registration, and token endpoints that an MCP server advertises
+
+Any user who can configure a model provider or MCP server can then reach the listed addresses, so list individual hosts that are meant to serve those requests, such as a model gateway, rather than whole networks. `web_fetch`, `web_search`, event webhooks, integrations, OAuth client metadata fetches, email delivery, and sandbox provider APIs stay public-only regardless of this setting.
+
+Omnara rejects entries that cover every address (`0.0.0.0/0`, `::/0`) or overlap link-local and cloud metadata ranges (`169.254.0.0/16`, `fe80::/10`), multicast (`224.0.0.0/4`, `ff00::/8`), the unspecified addresses (`0.0.0.0`, `::`), or the IPv6 ranges that embed IPv4 addresses (`::ffff:0:0/96`, `::/96`, `64:ff9b::/96`, `2002::/16`). List IPv4 destinations in plain IPv4 form. A literal IP in a base URL or MCP URL is checked against the allowlist when it is saved; hostnames are checked after DNS resolution on every connection.
+
 ## API rate limits
 
 Limits apply per user, per org for org API keys, and per machine for machine daemons.
