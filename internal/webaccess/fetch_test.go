@@ -6,9 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/omnara-ai/omnara/internal/outboundhttp"
 )
 
 func devFetcher() *Fetcher {
@@ -402,6 +406,44 @@ func TestFetchSSRFBlocksPrivateAddresses(t *testing.T) {
 		if !strings.Contains(providerErr.Message, "run_command") {
 			t.Fatalf("%s: blocked error must include run_command guidance, got %q", target, providerErr.Message)
 		}
+	}
+}
+
+// TestFetchSSRFBlockedDespiteTransportAllowlist shows the outbound allowlist is
+// per transport, never global: a client given an allowlisted prefix reaches the
+// server while web_fetch stays blocked. The wiring guarantee is structural,
+// since NewFetcher takes no allowlist.
+func TestFetchSSRFBlockedDespiteTransportAllowlist(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	allowlisted := outboundhttp.NewPublicClient(outboundhttp.PublicClientOptions{
+		AllowedPrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
+	})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := allowlisted.Do(req)
+	if err != nil {
+		t.Fatalf("allowlisted client: %v", err)
+	}
+	_ = resp.Body.Close()
+	if calls.Load() != 1 {
+		t.Fatalf("allowlisted client reached the server %d times, want 1", calls.Load())
+	}
+
+	_, err = prodFetcher().Fetch(t.Context(), FetchRequest{URL: server.URL, TimeoutSeconds: 5})
+	providerErr, ok := AsProviderError(err)
+	if !ok || providerErr.Code != ErrorCodeFetchBlocked {
+		t.Fatalf("web_fetch: got %v, want %s", err, ErrorCodeFetchBlocked)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("web_fetch reached the server; calls = %d, want 1", calls.Load())
 	}
 }
 

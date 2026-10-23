@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -630,6 +631,32 @@ mcp:
 		CompileOptions{AllowInsecureLocalMCPHTTP: true},
 	); err == nil {
 		t.Fatal("expected public http mcp config to be rejected")
+	}
+}
+
+func TestCompileYAMLAllowsPrivateMCPIPOnlyWhenOutboundAllowlisted(t *testing.T) {
+	source := validAgentSource(`
+mcp:
+  docs:
+    url: https://10.0.0.5/mcp
+`)
+	if _, err := Compile(SourceFormatYAML, []byte(source), CompileOptions{}); err == nil {
+		t.Fatal("expected private mcp IP to be rejected without an allowlist")
+	}
+	allowlisted := CompileOptions{OutboundAllowedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.5/32")}}
+	if _, err := Compile(SourceFormatYAML, []byte(source), allowlisted); err != nil {
+		t.Fatalf("compile allowlisted private mcp IP: %v", err)
+	}
+	for name, rawURL := range map[string]string{
+		"unlisted private": "https://10.0.0.6/mcp",
+		"metadata":         "https://169.254.169.254/mcp",
+		"plain http":       "http://10.0.0.5/mcp",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ValidateMCPURL(rawURL, false, allowlisted.OutboundAllowedPrefixes); err == nil {
+				t.Fatalf("expected %s to be rejected", rawURL)
+			}
+		})
 	}
 }
 

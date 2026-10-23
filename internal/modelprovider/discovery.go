@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"sort"
@@ -45,6 +46,7 @@ type DiscoverFunc func(
 	apiKey string,
 	headers map[string]string,
 	allowLoopback bool,
+	allowedPrefixes []netip.Prefix,
 ) ([]DiscoveredModel, error)
 
 const (
@@ -59,6 +61,7 @@ func DiscoverModels(
 	apiKey string,
 	headers map[string]string,
 	allowLoopback bool,
+	allowedPrefixes []netip.Prefix,
 ) ([]DiscoveredModel, error) {
 	auth, err := routeAuthForProviderConfig(providerConfig, apiKey)
 	if err != nil {
@@ -74,7 +77,7 @@ func DiscoverModels(
 	}
 	ctx, cancel := context.WithTimeout(ctx, discoveryRequestTimeout)
 	defer cancel()
-	client := newSSRFHTTPClient(allowLoopback)
+	client := newSSRFHTTPClient(allowLoopback, allowedPrefixes)
 	client.Timeout = discoveryRequestTimeout
 	client = outboundhttp.CloneWithoutRedirects(client)
 	if providerConfig.APIVariant == modelprotocol.APIVariantOpenRouter {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strings"
@@ -48,7 +49,7 @@ type LimitsCatalog struct {
 }
 
 func NewLimitsCatalog() *LimitsCatalog {
-	client := newSSRFHTTPClient(false)
+	client := newSSRFHTTPClient(false, nil)
 	client.Timeout = catalogRequestTimeout
 	return &LimitsCatalog{
 		baseURL: openRouterCatalogBaseURL,
@@ -248,8 +249,9 @@ func NewDiscoverer(catalog *LimitsCatalog) DiscoverFunc {
 		apiKey string,
 		headers map[string]string,
 		allowLoopback bool,
+		allowedPrefixes []netip.Prefix,
 	) ([]DiscoveredModel, error) {
-		models, err := DiscoverModels(ctx, providerConfig, apiKey, headers, allowLoopback)
+		models, err := DiscoverModels(ctx, providerConfig, apiKey, headers, allowLoopback, allowedPrefixes)
 		if err != nil {
 			return nil, err
 		}
