@@ -168,8 +168,15 @@ func main() {
 		),
 		httpRecorder,
 	)
+	outboundAllowedPrefixes, err := cfg.OutboundAllowedPrefixes()
+	if err != nil {
+		log.Error("parse outbound allowed CIDRs", "error", err)
+		os.Exit(1)
+	}
+	// Only model provider and MCP clients honor the operator allowlist; web
+	// fetch, search, integrations, and event webhooks stay public-only.
 	mcpHTTPClient := outboundhttp.NewPublicClient(
-		outboundhttp.PublicClientOptions{AllowLoopback: cfg.AllowInsecureDev},
+		outboundhttp.PublicClientOptions{AllowLoopback: cfg.AllowInsecureDev, AllowedPrefixes: outboundAllowedPrefixes},
 	)
 	searchHTTPClient := metrics.NewObservedHTTPClient(
 		outboundhttp.NewPublicClient(outboundhttp.PublicClientOptions{}),
@@ -238,6 +245,7 @@ func main() {
 				AppTitle:      cfg.OpenRouterAppTitle,
 				AppCategories: cfg.OpenRouterAppCategories,
 			},
+			AllowedPrefixes: outboundAllowedPrefixes,
 		},
 		MCP:                  mcp.New(mcp.Options{HTTPClient: mcpHTTPClient}),
 		MCPAuthHTTPClient:    mcpHTTPClient,

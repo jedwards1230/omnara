@@ -37,9 +37,9 @@ The dashboard guides you through this chain. The [CLI](/quickstart) and API expo
 
   <ModelProvidersCreate />
 
-  Presets are available for `openai`, `anthropic`, and `openrouter`. For a proxy, local vLLM server, or another compatible endpoint, set the API format, base URL, endpoint path, and authentication method yourself.
+  Presets are available for `openai`, `anthropic`, and `openrouter`. For a proxy, local vLLM server, or another compatible endpoint, set the API format, base URL, endpoint path, and authentication method yourself. The endpoint must resolve to a public IP address: Omnara refuses private, loopback, and other special-use addresses. Self-hosted operators can allow specific private endpoints with [`OMNARA_OUTBOUND_ALLOWED_CIDRS`](/self-hosting/configuration#outbound-network-policy). Allowlisted private endpoints must still use HTTPS; plain HTTP is accepted only for loopback URLs in insecure dev mode.
 
-  Omnara fetches the provider's model catalog when it creates the provider, and on demand with `omnara model-providers catalog {model-provider-config-id}`, `GET …/model-provider-configs/{id}/model-catalog`, or `sdk.getModelCatalog`. The catalog probe can fail without failing the request, which allows private or air-gapped endpoints. Check `model_catalog.status`; you can configure models manually if needed.
+  Omnara fetches the provider's model catalog when it creates the provider, and on demand with `omnara model-providers catalog {model-provider-config-id}`, `GET …/model-provider-configs/{id}/model-catalog`, or `sdk.getModelCatalog`. The catalog probe can fail without failing the request. Check `model_catalog.status`; you can configure models manually if needed.
 
   A provider cannot be deleted while it still has configured models.
 </Tab>

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/blobstore"
 	"github.com/omnara-ai/omnara/internal/modelprovider"
 	"github.com/omnara-ai/omnara/internal/secrets"
+	"github.com/omnara-ai/omnara/internal/ssrf"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 	"github.com/omnara-ai/omnara/internal/storage/modelstore"
@@ -94,6 +96,7 @@ type Config struct {
 	PublicAPIURL                      string
 	BillingURL                        string
 	TrustedProxyCIDRs                 []string
+	OutboundAllowedCIDRs              []string
 	APIRateLimitReadsPerHour          int
 	APIRateLimitWritesPerHour         int
 	APIRateLimitBurst                 int
@@ -321,6 +324,7 @@ func Load() (Config, error) {
 		PublicAPIURL:                      publicAPIURL,
 		BillingURL:                        normalizePublicURL(getenv("OMNARA_BILLING_URL", "")),
 		TrustedProxyCIDRs:                 getenvCSV("OMNARA_TRUSTED_PROXY_CIDRS"),
+		OutboundAllowedCIDRs:              getenvCSV("OMNARA_OUTBOUND_ALLOWED_CIDRS"),
 		APIRateLimitReadsPerHour:          apiRateLimitReadsPerHour,
 		APIRateLimitWritesPerHour:         apiRateLimitWritesPerHour,
 		APIRateLimitBurst:                 apiRateLimitBurst,
@@ -546,6 +550,9 @@ func (cfg Config) ValidateAPI() error {
 			return fmt.Errorf("parse OMNARA_TRUSTED_PROXY_CIDRS: %w", err)
 		}
 	}
+	if _, err := cfg.OutboundAllowedPrefixes(); err != nil {
+		return err
+	}
 	if cfg.APIRateLimitReadsPerHour < 0 || cfg.APIRateLimitWritesPerHour < 0 {
 		return fmt.Errorf(
 			"OMNARA_API_RATE_LIMIT_READS_PER_HOUR and OMNARA_API_RATE_LIMIT_WRITES_PER_HOUR must not be negative",
@@ -727,7 +734,21 @@ func (cfg Config) ValidateWorker() error {
 	if err := validateSkillDownloadSigningKeyConfig(cfg); err != nil {
 		return err
 	}
+	if _, err := cfg.OutboundAllowedPrefixes(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// OutboundAllowedPrefixes parses OMNARA_OUTBOUND_ALLOWED_CIDRS, the operator
+// allowlist that lets model provider and MCP requests reach otherwise-blocked
+// private destinations. It is empty unless explicitly configured.
+func (cfg Config) OutboundAllowedPrefixes() ([]netip.Prefix, error) {
+	prefixes, err := ssrf.ParseAllowedPrefixes(cfg.OutboundAllowedCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("parse OMNARA_OUTBOUND_ALLOWED_CIDRS: %w", err)
+	}
+	return prefixes, nil
 }
 
 func (cfg Config) ValidateMigrate() error {

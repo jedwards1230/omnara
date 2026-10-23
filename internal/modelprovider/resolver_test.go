@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -222,6 +223,59 @@ func TestHTTPClientForProviderConfigAllowsLoopbackInDevMode(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+func TestHTTPClientForProviderConfigReachesAllowlistedPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	resolver := Resolver{AllowedPrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}}
+	first, err := resolver.httpClientForProviderConfig(modelstore.ModelProviderConfigRecord{
+		APIFormat: modelprotocol.APIFormatOpenAIResponses,
+	})
+	if err != nil {
+		t.Fatalf("first http client for provider config: %v", err)
+	}
+	second, err := resolver.httpClientForProviderConfig(modelstore.ModelProviderConfigRecord{
+		APIFormat: modelprotocol.APIFormatAnthropicMessages,
+	})
+	if err != nil {
+		t.Fatalf("second http client for provider config: %v", err)
+	}
+	if first.Transport == nil || first.Transport != second.Transport {
+		t.Fatalf("allowlisted transports not reused: first=%p second=%p", first.Transport, second.Transport)
+	}
+	if first.Transport == defaultHTTPTransport || first.Transport == loopbackHTTPTransport {
+		t.Fatal("allowlisted resolver must not use the default transports")
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/responses", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := first.Do(req)
+	if err != nil {
+		t.Fatalf("allowlisted loopback request without dev mode: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	unlisted, err := (Resolver{}).httpClientForProviderConfig(modelstore.ModelProviderConfigRecord{
+		APIFormat: modelprotocol.APIFormatOpenAIResponses,
+	})
+	if err != nil {
+		t.Fatalf("unlisted http client for provider config: %v", err)
+	}
+	blockedResp, err := unlisted.Do(req)
+	if err == nil {
+		_ = blockedResp.Body.Close()
+	}
+	if !errors.Is(err, ssrf.ErrBlockedAddress) {
+		t.Fatalf("unlisted loopback error = %v, want ssrf.ErrBlockedAddress", err)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 
@@ -231,7 +232,11 @@ func createModelProviderConfigHasField(body openapigen.CreateModelProviderConfig
 	}
 }
 
-func validateModelProviderBaseURLNetworkPolicy(baseURL string, allowInsecureDev bool) error {
+func validateModelProviderBaseURLNetworkPolicy(
+	baseURL string,
+	allowInsecureDev bool,
+	allowedPrefixes []netip.Prefix,
+) error {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
 	if err != nil {
 		return errors.New("base_url is invalid")
@@ -250,7 +255,7 @@ func validateModelProviderBaseURLNetworkPolicy(baseURL string, allowInsecureDev 
 	if ip == nil {
 		return nil
 	}
-	if ssrf.IsAllowedIP(ip, allowInsecureDev) {
+	if ssrf.IsAllowedIPWithPrefixes(ip, allowInsecureDev, allowedPrefixes) {
 		return nil
 	}
 	if ip.IsLoopback() {
@@ -315,6 +320,7 @@ func (s strictOpenAPIServer) CreateModelProviderConfig(
 	if err := validateModelProviderBaseURLNetworkPolicy(
 		command.BaseURL,
 		s.server.allowInsecureModelProviderEndpoints,
+		s.server.outboundAllowedPrefixes,
 	); err != nil {
 		return nil, apierror.FromCode(openapigen.ErrorCodeInvalidRequest, err.Error())
 	}
@@ -405,6 +411,7 @@ func (s strictOpenAPIServer) providerModelCatalog(
 		apiKey,
 		headers,
 		s.server.allowInsecureModelProviderEndpoints,
+		s.server.outboundAllowedPrefixes,
 	)
 	if err != nil {
 		return failed(err.Error())
@@ -551,6 +558,7 @@ func (s strictOpenAPIServer) UpdateModelProviderConfig(
 		if err := validateModelProviderBaseURLNetworkPolicy(
 			*input.BaseURL,
 			s.server.allowInsecureModelProviderEndpoints,
+			s.server.outboundAllowedPrefixes,
 		); err != nil {
 			return nil, apierror.FromCode(openapigen.ErrorCodeInvalidRequest, err.Error())
 		}

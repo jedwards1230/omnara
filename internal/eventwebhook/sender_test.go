@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/notifications"
 	"github.com/omnara-ai/omnara/internal/outboundhttp"
 	"github.com/omnara-ai/omnara/internal/publicid"
+	"github.com/omnara-ai/omnara/internal/ssrf"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 	"github.com/stretchr/testify/require"
@@ -256,6 +258,35 @@ func TestSenderBlocksPrivateDestinationsAndRedirects(t *testing.T) {
 	sender.client = outboundhttp.CloneWithoutRedirects(redirect.Client())
 	require.ErrorContains(t, sender.send(t.Context(), delivery), "HTTP 307")
 	require.Zero(t, calls.Load())
+}
+
+// TestSenderBlockedDespiteTransportAllowlist shows the outbound allowlist is
+// per transport, never global: a client given an allowlisted prefix reaches the
+// destination while event webhooks stay blocked. The wiring guarantee is
+// structural, since New takes no allowlist.
+func TestSenderBlockedDespiteTransportAllowlist(t *testing.T) {
+	var calls atomic.Int64
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer destination.Close()
+
+	allowlisted := outboundhttp.NewPublicClient(outboundhttp.PublicClientOptions{
+		AllowedPrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
+	})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, destination.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := allowlisted.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, int64(1), calls.Load())
+
+	// testSender builds the sender through New, as cmd/worker does.
+	sender, store, delivery := testSender()
+	store.target.URL = destination.URL
+	require.ErrorIs(t, sender.send(t.Context(), delivery), ssrf.ErrBlockedAddress)
+	require.Equal(t, int64(1), calls.Load())
 }
 
 func TestSenderTimeoutAndShutdownLeaveClaimsRecoverable(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -169,6 +170,11 @@ type CompileOptions struct {
 	ResolveMachinePoolName    func(machinePoolName string) (uuid.UUID, error)
 	ResolveSkillID            func(skillID string) (SkillResolution, error)
 	ResolveAgentProfileName   func(profileName string) (uuid.UUID, error)
+	// OutboundAllowedPrefixes admits literal MCP URL IPs inside the operator
+	// allowlist (OMNARA_OUTBOUND_ALLOWED_CIDRS); see ssrf.ParseAllowedPrefixes.
+	// httpapi.New sets it from WithOutboundAllowedPrefixes, overriding any value
+	// passed through WithAgentConfigOptions.
+	OutboundAllowedPrefixes []netip.Prefix
 }
 
 type ResolvedModelSelection struct {

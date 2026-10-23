@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"testing"
 
 	"github.com/omnara-ai/omnara/internal/modelprovider"
@@ -30,6 +31,7 @@ func TestOutputCapacityCreationAndPatch(t *testing.T) {
 			pool := openIntegrationDB(t, ctx)
 			handler := newIntegrationServer(pool, WithModelDiscoverer(func(
 				_ context.Context, _ modelstore.ModelProviderConfigRecord, _ string, _ map[string]string, _ bool,
+				_ []netip.Prefix,
 			) ([]modelprovider.DiscoveredModel, error) {
 				return []modelprovider.DiscoveredModel{{
 					Slug: "capacity-model", ContextWindowTokens: new(128000), MaxOutputTokens: new(64000),
