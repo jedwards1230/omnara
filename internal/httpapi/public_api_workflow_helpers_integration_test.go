@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strings"
 	"testing"
@@ -289,6 +290,7 @@ func newIntegrationServerWithStoreOptions(
 				string,
 				map[string]string,
 				bool,
+				[]netip.Prefix,
 			) ([]modelprovider.DiscoveredModel, error) {
 				return nil, errors.New("model discovery is disabled in integration tests")
 			}),

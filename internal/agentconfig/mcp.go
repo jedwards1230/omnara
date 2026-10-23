@@ -3,6 +3,7 @@ package agentconfig
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -95,7 +96,7 @@ func compileMCPServers(
 ) (map[string]MCPServerCompiled, error) {
 	compiled := make(map[string]MCPServerCompiled, len(source))
 	for serverKey, server := range source {
-		endpoint, err := ValidateMCPURL(server.URL, opts.AllowInsecureLocalMCPHTTP)
+		endpoint, err := ValidateMCPURL(server.URL, opts.AllowInsecureLocalMCPHTTP, opts.OutboundAllowedPrefixes)
 		if err != nil {
 			return nil, issueAt(jsonPointer("mcp", serverKey, "url"), err)
 		}
@@ -186,7 +187,7 @@ func mcpAuthSecretKind(authType string) (secrets.Kind, error) {
 	}
 }
 
-func ValidateMCPURL(raw string, allowInsecureLocalHTTP bool) (string, error) {
+func ValidateMCPURL(raw string, allowInsecureLocalHTTP bool, allowedPrefixes []netip.Prefix) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", errors.New("url is required")
@@ -217,7 +218,8 @@ func ValidateMCPURL(raw string, allowInsecureLocalHTTP bool) (string, error) {
 	default:
 		return "", errors.New("url scheme must be https")
 	}
-	if host.IP != nil && !ssrf.IsAllowedIP(host.IP, allowInsecureLocalHTTP && parsed.Scheme == "http") {
+	allowLoopback := allowInsecureLocalHTTP && parsed.Scheme == "http"
+	if host.IP != nil && !ssrf.IsAllowedIPWithPrefixes(host.IP, allowLoopback, allowedPrefixes) {
 		return "", fmt.Errorf("url host IP is not permitted: %s", host.IP.String())
 	}
 	return parsed.String(), nil

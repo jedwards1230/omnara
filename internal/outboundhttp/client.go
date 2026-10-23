@@ -5,6 +5,7 @@ package outboundhttp
 import (
 	"errors"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/omnara-ai/omnara/internal/ssrf"
@@ -16,6 +17,9 @@ type PublicClientOptions struct {
 	AllowLoopback                bool
 	DisableResponseHeaderTimeout bool
 	Timeout                      time.Duration
+	// AllowedPrefixes is passed to ssrf.TransportOptions.AllowedPrefixes. Only
+	// operator-trusted clients (model providers, MCP) may set it.
+	AllowedPrefixes []netip.Prefix
 }
 
 func NewPublicClient(opts PublicClientOptions) *http.Client {
@@ -23,6 +27,7 @@ func NewPublicClient(opts PublicClientOptions) *http.Client {
 		Transport: ssrf.NewTransport(ssrf.TransportOptions{
 			AllowLoopback:                opts.AllowLoopback,
 			DisableResponseHeaderTimeout: opts.DisableResponseHeaderTimeout,
+			AllowedPrefixes:              opts.AllowedPrefixes,
 		}),
 		Timeout: opts.Timeout,
 	})
