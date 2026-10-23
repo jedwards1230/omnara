@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Create the annotated homelab-vX.Y.Z-rN tag at the planned commit and push it
 # to the fork. Runs before any image is pushed, so a rejected push (for example
-# the GITHUB_TOKEN "workflows" permission refusal) stops the run with nothing
-# published. Never force-pushes: an existing tag makes the push fail.
+# GitHub refusing a GITHUB_TOKEN push that introduces a new commit changing
+# .github/workflows/*) stops the run with nothing published. Never
+# force-pushes: an existing tag makes the push fail.
 #
 # Usage: push-tag.sh DIR   (DIR from materialize.sh --full)
 # Env:   FORK_REPO GIT_TAG COMMIT TREE UPSTREAM_TAG UPSTREAM_COMMIT PATCH_REF
@@ -43,10 +44,10 @@ printf '%s\n' "$out"
 if [[ $status -ne 0 ]]; then
 	if grep -qiE 'workflows?.*permission|refusing to allow' <<<"$out"; then
 		fail "Tag push rejected: missing workflows permission" \
-			"Pushing \`${GIT_TAG}\` with ${TOKEN_NAME} was refused. The tag makes upstream commits that change \`.github/workflows/*\` reachable in this fork for the first time, and GitHub only allows that with the \`workflows\` permission, which GITHUB_TOKEN never has." \
+			"Pushing \`${GIT_TAG}\` with ${TOKEN_NAME} was refused: it introduces a commit that changes \`.github/workflows/*\` and is new to this repository network, and GITHUB_TOKEN never has the \`workflows\` permission. Commits that already exist upstream do not trigger this, so the usual cause is a patch that touches \`.github/workflows/*\`." \
 			"" '```' "$out" '```' "" \
 			"Nothing was published (no image is pushed before the tag). Fix one of these, then re-run:" \
-			"- Bring the fork's \`main\` up to date with upstream from an account that may write workflows (\`gh repo sync ${FORK_REPO} --branch main\`), so the upstream commits are already reachable; or" \
+			"- drop the workflow change from the patch commit on \`${PATCH_REF:-the patch branch}\` and force-push it; or" \
 			"- store a fine-grained token for ${FORK_REPO} with Contents: read and write and Workflows: read and write as the repository secret \`HOMELAB_SYNC_TOKEN\`; this job uses it for the push when it is set."
 	fi
 	fail "Tag push rejected" "Pushing \`${GIT_TAG}\` with ${TOKEN_NAME} failed. Nothing was published." '```' "$out" '```'

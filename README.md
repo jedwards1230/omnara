@@ -146,17 +146,19 @@ gh workflow run upstream-sync.yaml -R jedwards1230/omnara
 ### Known limits
 
 - **Workflow-file commits and `GITHUB_TOKEN`.** GitHub rejects a push made with
-  `GITHUB_TOKEN` that makes commits changing `.github/workflows/*` reachable in
-  this repository for the first time, and a new upstream release usually
-  contains such commits that this fork has not seen. The tag push happens
-  before any image, so this fails the run with nothing published. Either keep
-  `main` in sync with upstream (`gh repo sync jedwards1230/omnara --branch main`
-  from an account that may write workflows), or add a fine-grained token for
-  this repository with *Contents: read and write* and *Workflows: read and
-  write* as the repository secret `HOMELAB_SYNC_TOKEN`; the tag job uses it when
-  it is set. A tag pushed with that token does trigger `push` workflows in the
-  tagged tree, but none of upstream's matches a `homelab-v*` tag, and they are
-  disabled here anyway.
+  `GITHUB_TOKEN` ("refusing to allow a GitHub App to create or update
+  workflow") when it introduces a commit that changes `.github/workflows/*` and
+  is new to the fork network. Measured on this fork: commits that already exist
+  upstream are accepted even when no fork ref reaches them, for tags and
+  branches alike, and so is a new commit on top of them that does not touch
+  workflows. A rebased patch therefore pushes fine with `GITHUB_TOKEN` as long
+  as **the patch does not change `.github/workflows/*`** (keep it that way). If
+  a push is ever rejected, the tag push happens before any image, so the run
+  fails with nothing published; add a fine-grained token for this repository
+  with *Contents: read and write* and *Workflows: read and write* as the
+  repository secret `HOMELAB_SYNC_TOKEN`, which the tag job then uses. A tag
+  pushed with that token does trigger `push` workflows in the tagged tree, but
+  none of upstream's matches a `homelab-v*` tag, and they are disabled here.
 - **60-day schedule timeout.** GitHub disables scheduled workflows in public
   repositories after 60 days without repository activity. Every run re-enables
   the workflow through the API (`actions: write`), which resets that timer. If
@@ -176,3 +178,14 @@ Upstream's own workflows (CI, releases, live tests, PR automation) are
 **disabled** in this fork: they publish to upstream's registries and release
 channels, need upstream's secrets and labels, or only duplicate upstream's own
 CI on mirrored commits. Only `upstream-sync.yaml` runs here.
+
+GitHub forgets the state of a workflow that is neither on the default branch
+nor has any run, so disabling them while `main` was the default branch did not
+survive the switch to `homelab`. Each upstream path was therefore registered
+by one no-op run from a throwaway branch and then disabled; **keep those runs**
+(the "registration probe" runs), because deleting them drops the registration
+and the disabled state with it. Check with:
+
+```sh
+gh api repos/jedwards1230/omnara/actions/workflows --jq '.workflows[] | "\(.state)\t\(.path)"'
+```
