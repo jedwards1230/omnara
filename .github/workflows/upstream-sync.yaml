@@ -180,8 +180,38 @@ jobs:
 
       - run: corepack enable
 
+      # Upstream's ci.yaml apt-installs ripgrep gcc libc6-dev. On hosted
+      # runners the Ubuntu mirrors sometimes fail to resolve for minutes
+      # (apt exit 100), so take ripgrep from its checksum-pinned GitHub
+      # release instead (same version as noble's apt package). gcc and
+      # libc6-dev ship in the runner image; apt, with retries, is only a
+      # fallback for when they don't.
       - name: Install test tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep gcc libc6-dev
+        env:
+          RG_VERSION: 14.1.0
+          RG_SHA256: f84757b07f425fe5cf11d87df6644691c644a5cd2348a2c670894272999d3ba7
+        run: |
+          rg_tgz="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$RUNNER_TEMP/$rg_tgz" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${rg_tgz}"
+          echo "${RG_SHA256}  $RUNNER_TEMP/$rg_tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$rg_tgz" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/${rg_tgz%.tar.gz}/rg" /usr/local/bin/rg
+          rg --version
+
+          if command -v gcc >/dev/null && dpkg-query -W -f='${Status}' libc6-dev 2>/dev/null | grep -q 'ok installed'; then
+            exit 0
+          fi
+          for attempt in 1 2 3 4; do
+            if sudo apt-get -o Acquire::Retries=5 update &&
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends gcc libc6-dev; then
+              exit 0
+            fi
+            echo "::warning::apt attempt ${attempt} failed; retrying"
+            sleep $((attempt * 20))
+          done
+          echo "::error::Could not install gcc libc6-dev after 4 apt attempts"
+          exit 1
 
       - name: make verify
         working-directory: src
